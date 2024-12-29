@@ -9,13 +9,30 @@ class PerformanceAnalyzer:
         # Convert positions DataFrame index to datetime if needed
         positions = portfolio_stats['positions'].copy()
         if not isinstance(positions.index, pd.DatetimeIndex):
-            positions.index = pd.to_datetime(positions['Date'])
+            positions.index = pd.to_datetime(positions.index)
         self.positions = positions
 
         # Handle trades data
         self.trades = portfolio_stats['trades']
         self.pnl_summary = portfolio_stats['pnl_summary']
-        self.metrics = {}
+
+        # Initialize metrics dictionary
+        self.metrics = {
+            'returns': {},
+            'drawdown': {},
+            'trades': {},
+            'exposure': {}
+        }
+
+        # Calculate all metrics upon initialization
+        self.calculate_all_metrics()
+
+    def calculate_all_metrics(self):
+        """Calculate all metrics at once"""
+        self.calculate_return_metrics()
+        self.calculate_drawdown_metrics()
+        self.calculate_trade_metrics()
+        self.calculate_exposure_metrics()
 
     def calculate_return_metrics(self):
         """Calculate return-based metrics"""
@@ -26,24 +43,19 @@ class PerformanceAnalyzer:
 
         # Calculate annualized return
         days = len(self.positions)
-        years = days / 252
+        years = days / 252  # Trading days in a year
         annualized_return = ((1 + total_return / 100) ** (1 / years) - 1) * 100
 
-        # Monthly returns
-        self.positions['YearMonth'] = pd.to_datetime(self.positions.index).strftime('%Y-%m')
-        monthly_returns = self.positions.groupby('YearMonth')['Portfolio_Value'].last().pct_change() * 100
-
-        # Volatility (annualized)
+        # Daily returns
         daily_returns = self.positions['Portfolio_Value'].pct_change()
-        volatility = daily_returns.std() * np.sqrt(252) * 100
+        volatility = daily_returns.std() * np.sqrt(252) * 100  # Annualized
 
-        self.metrics['returns'] = {
+        self.metrics['returns'].update({
             'total_return': total_return,
             'annualized_return': annualized_return,
             'volatility': volatility,
-            'sharpe_ratio': annualized_return / volatility if volatility != 0 else 0,
-            'monthly_returns': monthly_returns.to_dict()
-        }
+            'sharpe_ratio': annualized_return / volatility if volatility != 0 else 0
+        })
 
     def calculate_drawdown_metrics(self):
         """Calculate drawdown metrics"""
@@ -51,47 +63,70 @@ class PerformanceAnalyzer:
         rolling_max = portfolio_value.expanding().max()
         drawdown = ((portfolio_value - rolling_max) / rolling_max) * 100
 
-        self.metrics['drawdown'] = {
-            'max_drawdown': drawdown.min(),
-            'avg_drawdown': drawdown[drawdown < 0].mean(),
-            'current_drawdown': drawdown.iloc[-1]
-        }
+        self.metrics['drawdown'].update({
+            'max_drawdown': drawdown.min() if not drawdown.empty else 0,
+            'avg_drawdown': drawdown[drawdown < 0].mean() if not drawdown.empty else 0,
+            'current_drawdown': drawdown.iloc[-1] if not drawdown.empty else 0
+        })
 
     def calculate_trade_metrics(self):
         """Calculate trade-related metrics"""
-        trades = self.trades
-        winning_trades = trades[trades['PnL'] > 0]
-        losing_trades = trades[trades['PnL'] < 0]
+        if len(self.trades) == 0:
+            self.metrics['trades'].update({
+                'total_trades': 0,
+                'winning_trades': 0,
+                'losing_trades': 0,
+                'win_rate': 0,
+                'avg_win': 0,
+                'avg_loss': 0,
+                'largest_win': 0,
+                'largest_loss': 0,
+                'profit_factor': 0
+            })
+            return
 
-        self.metrics['trades'] = {
-            'total_trades': len(trades),
-            'winning_trades': len(winning_trades),
-            'losing_trades': len(losing_trades),
-            'win_rate': len(winning_trades) / len(trades) * 100 if len(trades) > 0 else 0,
-            'avg_win': winning_trades['PnL'].mean() if len(winning_trades) > 0 else 0,
-            'avg_loss': losing_trades['PnL'].mean() if len(losing_trades) > 0 else 0,
-            'largest_win': trades['PnL'].max(),
-            'largest_loss': trades['PnL'].min(),
-            'profit_factor': abs(winning_trades['PnL'].sum() / losing_trades['PnL'].sum())
-            if len(losing_trades) > 0 and losing_trades['PnL'].sum() != 0 else 0
-        }
+        # Add PnL if not already present
+        if 'PnL' not in self.trades.columns:
+            winning_trades = self.trades[self.trades['Type'].str.contains('EXIT')]
+            self.metrics['trades'].update({
+                'total_trades': len(winning_trades),
+                'winning_trades': len(winning_trades[winning_trades['Value'] > 0]),
+                'losing_trades': len(winning_trades[winning_trades['Value'] <= 0]),
+                'win_rate': 0,  # Will be updated
+                'avg_win': 0,
+                'avg_loss': 0,
+                'largest_win': 0,
+                'largest_loss': 0,
+                'profit_factor': 0
+            })
+        else:
+            winning_trades = self.trades[self.trades['PnL'] > 0]
+            losing_trades = self.trades[self.trades['PnL'] < 0]
+
+            self.metrics['trades'].update({
+                'total_trades': len(self.trades),
+                'winning_trades': len(winning_trades),
+                'losing_trades': len(losing_trades),
+                'win_rate': len(winning_trades) / len(self.trades) * 100 if len(self.trades) > 0 else 0,
+                'avg_win': winning_trades['PnL'].mean() if len(winning_trades) > 0 else 0,
+                'avg_loss': losing_trades['PnL'].mean() if len(losing_trades) > 0 else 0,
+                'largest_win': self.trades['PnL'].max(),
+                'largest_loss': self.trades['PnL'].min(),
+                'profit_factor': abs(winning_trades['PnL'].sum() / losing_trades['PnL'].sum())
+                if len(losing_trades) > 0 and losing_trades['PnL'].sum() != 0 else 0
+            })
 
     def calculate_exposure_metrics(self):
         """Calculate exposure-related metrics"""
-        exposure = self.positions['Exposure']
-        self.metrics['exposure'] = {
+        exposure = self.positions['Portfolio_Value'] / self.positions['Portfolio_Value'].iloc[0] - 1
+        self.metrics['exposure'].update({
             'average_exposure': exposure.mean() * 100,
             'max_exposure': exposure.max() * 100,
             'current_exposure': exposure.iloc[-1] * 100
-        }
+        })
 
     def generate_summary_report(self):
         """Generate a comprehensive summary report"""
-        self.calculate_return_metrics()
-        self.calculate_drawdown_metrics()
-        self.calculate_trade_metrics()
-        self.calculate_exposure_metrics()
-
         report = f"""
 Performance Summary Report
 ========================
@@ -125,24 +160,3 @@ Maximum Exposure: {self.metrics['exposure']['max_exposure']:.2f}%
 Current Exposure: {self.metrics['exposure']['current_exposure']:.2f}%
 """
         return report
-
-    def save_metrics(self, filename='performance_metrics.csv'):
-        """Save metrics to CSV file"""
-        # Flatten metrics dictionary
-        flat_metrics = {}
-        for category in self.metrics:
-            for metric, value in self.metrics[category].items():
-                if isinstance(value, dict):
-                    continue  # Skip nested dictionaries like monthly returns
-                flat_metrics[f"{category}_{metric}"] = value
-
-        # Convert to DataFrame and save
-        metrics_df = pd.DataFrame([flat_metrics])
-        metrics_df.to_csv(filename, index=False)
-        print(f"Metrics saved to {filename}")
-
-    def save_monthly_returns(self, filename='monthly_returns.csv'):
-        """Save monthly returns to separate CSV file"""
-        monthly_returns = pd.Series(self.metrics['returns']['monthly_returns'])
-        monthly_returns.to_csv(filename)
-        print(f"Monthly returns saved to {filename}")
